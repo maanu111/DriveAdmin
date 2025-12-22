@@ -1,10 +1,12 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { ClimbingBoxLoader } from "react-spinners";
 import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx";
-
+import { HotTable } from "@handsontable/react";
+import "handsontable/dist/handsontable.full.min.css";
+import Handsontable from "handsontable";
 interface Question {
   id: string;
   question: string;
@@ -16,10 +18,17 @@ interface Question {
   explanation?: string | null;
   media_type?: string | null;
   media_url?: string | null;
+  category_id?: string | null;
   created_at: string;
   updated_at: string;
 }
-
+interface Category {
+  id: string;
+  name: string;
+  description?: string | null;
+  created_at: string;
+  updated_at: string;
+}
 // Helper function to detect and embed videos
 // ✅ FIXED: Now handles BOTH images AND videos
 const getVideoEmbed = (url: string, className: string) => {
@@ -67,6 +76,7 @@ const getVideoEmbed = (url: string, className: string) => {
   // Generic iframe for any other streaming platform
   return <iframe src={url} className={className} allowFullScreen />;
 };
+
 export default function QuestionsPage() {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [loading, setLoading] = useState(true);
@@ -88,11 +98,24 @@ export default function QuestionsPage() {
   const [mediaFilter, setMediaFilter] = useState<"ALL" | "WITH" | "WITHOUT">(
     "ALL"
   );
+  const [showBulkEdit, setShowBulkEdit] = useState(false);
   const [mediaQuestion, setMediaQuestion] = useState<Question | null>(null);
   const [mediaUrlInput, setMediaUrlInput] = useState("");
-
+  const [pendingChanges, setPendingChanges] = useState<Map<string, any>>(
+    new Map()
+  );
+  const [isExcelMode, setIsExcelMode] = useState(false);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
+  const [showCategoryModal, setShowCategoryModal] = useState(false);
+  const [showBulkCategoryModal, setShowBulkCategoryModal] = useState(false);
+  const [bulkCategoryId, setBulkCategoryId] = useState<string>("");
+  const [selectedQuestions, setSelectedQuestions] = useState<Set<string>>(
+    new Set()
+  );
   useEffect(() => {
     fetchQuestions();
+    fetchCategories();
   }, []);
 
   useEffect(() => {
@@ -307,6 +330,74 @@ export default function QuestionsPage() {
     }
     setLoading(false);
   };
+  const fetchCategories = async () => {
+    const { data, error } = await supabase
+      .from("categories")
+      .select("*")
+      .order("name", { ascending: true });
+
+    if (error) {
+      console.error("Error fetching categories:", error);
+    } else {
+      setCategories(data || []);
+    }
+  };
+  const handleCellEdit = (changes: any[]) => {
+    const newChanges = new Map(pendingChanges);
+
+    changes.forEach(([row, col, oldValue, newValue]) => {
+      const questionId = filteredQuestions[row].id;
+
+      if (!newChanges.has(questionId)) {
+        newChanges.set(questionId, { ...filteredQuestions[row] });
+      }
+
+      const question = newChanges.get(questionId);
+      const fieldMap = [
+        "serial_number",
+        "question",
+        "option_a",
+        "option_b",
+        "correct_answer",
+        "explanation",
+        "media_url",
+        "id",
+      ];
+      const fieldName = fieldMap[col];
+
+      if (fieldName) {
+        question[fieldName] = newValue;
+      }
+    });
+
+    setPendingChanges(newChanges);
+  };
+  const handleSaveAllChanges = async () => {
+    if (pendingChanges.size === 0) return;
+
+    setLoading(true);
+
+    for (const [id, question] of pendingChanges.entries()) {
+      await supabase
+        .from("questions")
+        .update({
+          question: question.question,
+          option_a: question.option_a,
+          option_b: question.option_b,
+          correct_answer: question.correct_answer,
+          explanation: question.explanation || null,
+          media_url: question.media_url || null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", id);
+    }
+
+    setPendingChanges(new Map());
+    await fetchQuestions();
+    setLoading(false);
+    setIsExcelMode(false); // ← ADD THIS LINE - Switch back to list view
+    alert("All changes saved successfully!");
+  };
 
   const handleDelete = async (id: string) => {
     if (!confirm("Are you sure you want to delete this question?")) return;
@@ -335,26 +426,103 @@ export default function QuestionsPage() {
   };
 
   const filteredQuestions = questions.filter((q) => {
-    // search
     const matchesSearch = q.question
       .toLowerCase()
       .includes(searchTerm.toLowerCase());
 
-    // correct / incorrect filter
     const actualStatus = q.correct_answer === "A" ? q.option_a : q.option_b;
-
     const matchesAnswer =
       answerFilter === "ALL" || actualStatus === answerFilter;
 
-    // media filter
     const matchesMedia =
       mediaFilter === "ALL" ||
       (mediaFilter === "WITH" && q.media_url) ||
       (mediaFilter === "WITHOUT" && !q.media_url);
 
-    return matchesSearch && matchesAnswer && matchesMedia;
-  });
+    // Add category filter
+    const matchesCategory =
+      selectedCategory === "ALL" ||
+      (selectedCategory === "UNCATEGORIZED" && !q.category_id) ||
+      q.category_id === selectedCategory;
 
+    return matchesSearch && matchesAnswer && matchesMedia && matchesCategory;
+  });
+  //
+  const handleBulkAddToCategory = async () => {
+    if (!bulkCategoryId || selectedQuestions.size === 0) {
+      alert("Please select a category and at least one question");
+      return;
+    }
+
+    setLoading(true);
+
+    for (const questionId of selectedQuestions) {
+      await supabase
+        .from("questions")
+        .update({
+          category_id: bulkCategoryId,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", questionId);
+    }
+
+    setSelectedQuestions(new Set());
+    setBulkCategoryId("");
+    setShowBulkCategoryModal(false);
+    await fetchQuestions();
+    setLoading(false);
+    alert(`${selectedQuestions.size} questions added to category!`);
+  };
+
+  const handleBulkRemoveFromCategory = async () => {
+    if (selectedQuestions.size === 0) {
+      alert("Please select at least one question");
+      return;
+    }
+
+    if (
+      !confirm(
+        `Remove ${selectedQuestions.size} questions from their categories?`
+      )
+    ) {
+      return;
+    }
+
+    setLoading(true);
+
+    for (const questionId of selectedQuestions) {
+      await supabase
+        .from("questions")
+        .update({
+          category_id: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", questionId);
+    }
+
+    setSelectedQuestions(new Set());
+    await fetchQuestions();
+    setLoading(false);
+    alert("Questions removed from categories!");
+  };
+
+  const handleSelectAll = () => {
+    if (selectedQuestions.size === filteredQuestions.length) {
+      setSelectedQuestions(new Set());
+    } else {
+      setSelectedQuestions(new Set(filteredQuestions.map((q) => q.id)));
+    }
+  };
+
+  const toggleQuestionSelection = (id: string) => {
+    const newSelection = new Set(selectedQuestions);
+    if (newSelection.has(id)) {
+      newSelection.delete(id);
+    } else {
+      newSelection.add(id);
+    }
+    setSelectedQuestions(newSelection);
+  };
   // Pagination logic
   const totalPages = Math.ceil(filteredQuestions.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
@@ -367,50 +535,132 @@ export default function QuestionsPage() {
 
   return (
     <div className="min-h-screen bg-white">
-      <div className="max-w-7xl mx-auto p-8">
+      <div className="max-w-7xl mx-auto p-4">
         {/* Header */}
-        <div className="flex justify-between items-center mb-12 pb-6 border-b border-gray-200">
+        <div className="flex justify-between items-start mb-8 pb-4 border-b border-gray-200">
           <div>
-            <h1 className="text-3xl font-light text-gray-900">Questions</h1>
-            <p className="text-sm text-gray-500 mt-1">
+            <h1 className="text-2xl font-light text-gray-900">Questions</h1>
+            <p className="text-xs text-gray-500 mt-1">
               {filteredQuestions.length}{" "}
               {filteredQuestions.length === 1 ? "question" : "questions"}
+              {selectedQuestions.size > 0 &&
+                ` (${selectedQuestions.size} selected)`}
             </p>
           </div>
-          <div className="flex gap-3">
+          <div className="flex gap-2 flex-wrap justify-end">
+            <button
+              onClick={() => setShowCategoryModal(true)}
+              className="px-3 py-2 border border-gray-300 text-xs font-medium hover:border-gray-900 transition-colors"
+            >
+              Categories
+            </button>
+
+            {selectedQuestions.size > 0 && (
+              <>
+                <button
+                  onClick={() => setShowBulkCategoryModal(true)}
+                  className="px-3 py-2 bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 transition-colors"
+                >
+                  Add to Category
+                </button>
+                <button
+                  onClick={handleBulkRemoveFromCategory}
+                  className="px-3 py-2 bg-red-600 text-white text-xs font-medium hover:bg-red-700 transition-colors"
+                >
+                  Remove
+                </button>
+              </>
+            )}
+
             <button
               onClick={() => document.getElementById("excel-import")?.click()}
-              className="px-6 py-3 border border-gray-300 text-sm font-medium hover:border-gray-900 transition-colors"
+              className="px-3 py-2 border border-gray-300 text-xs font-medium hover:border-gray-900 transition-colors"
             >
               Import
             </button>
 
             <button
               onClick={exportToExcel}
-              className="px-6 py-3 border border-gray-300 text-sm font-medium hover:border-gray-900 transition-colors"
+              className="px-3 py-2 border border-gray-300 text-xs font-medium hover:border-gray-900 transition-colors"
             >
-              Export Format
+              Template
             </button>
+
             <button
               onClick={handleAdd}
-              className="px-6 py-3 bg-black text-white text-sm font-medium hover:bg-gray-800 transition-colors"
+              className="px-3 py-2 bg-black text-white text-xs font-medium hover:bg-gray-800 transition-colors"
             >
               Add Question
             </button>
+
+            {!isExcelMode ? (
+              <button
+                onClick={() => setIsExcelMode(true)}
+                className="px-3 py-2 border border-gray-300 text-xs font-medium hover:border-gray-900 transition-colors"
+              >
+                Bulk Edit
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  if (pendingChanges.size > 0) {
+                    if (
+                      confirm(
+                        "You have unsaved changes. Do you want to discard them?"
+                      )
+                    ) {
+                      setPendingChanges(new Map());
+                      setIsExcelMode(false);
+                    }
+                  } else {
+                    setIsExcelMode(false);
+                  }
+                }}
+                className="px-3 py-2 border border-gray-300 text-xs font-medium hover:border-gray-900 transition-colors"
+              >
+                Back
+              </button>
+            )}
           </div>
         </div>
 
         {/* Search Bar */}
-        <div className="mb-8">
+        <div className="mb-6">
           <input
             type="text"
             placeholder="Search questions..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full px-4 py-3 border border-gray-300 text-sm focus:outline-none focus:border-gray-900"
+            className="w-full px-3 py-2 border border-gray-300 text-xs focus:outline-none focus:border-gray-900"
           />
         </div>
 
+        {/* Category Filter */}
+        <div className="mb-6 flex gap-3 items-center">
+          <label className="text-xs font-medium text-gray-700">Category:</label>
+          <select
+            value={selectedCategory}
+            onChange={(e) => setSelectedCategory(e.target.value)}
+            className="px-3 py-1.5 border border-gray-300 text-xs focus:outline-none focus:border-gray-900"
+          >
+            <option value="ALL">All Categories</option>
+            <option value="UNCATEGORIZED">Uncategorized</option>
+            {categories.map((cat) => (
+              <option key={cat.id} value={cat.id}>
+                {cat.name}
+              </option>
+            ))}
+          </select>
+
+          {selectedQuestions.size > 0 && (
+            <button
+              onClick={() => setSelectedQuestions(new Set())}
+              className="ml-auto text-xs text-gray-600 hover:text-gray-900"
+            >
+              Clear ({selectedQuestions.size})
+            </button>
+          )}
+        </div>
         {/* Questions Table */}
         {loading ? (
           <div className="bg-white rounded-lg border border-gray-200 p-12">
@@ -418,7 +668,7 @@ export default function QuestionsPage() {
               <ClimbingBoxLoader color="#000000" loading={loading} size={15} />
             </div>
           </div>
-        ) : currentQuestions.length === 0 ? (
+        ) : filteredQuestions.length === 0 ? (
           <div className="text-center py-20">
             <p className="text-gray-400">
               {searchTerm
@@ -426,28 +676,43 @@ export default function QuestionsPage() {
                 : "No questions found. Add your first question!"}
             </p>
           </div>
-        ) : (
+        ) : !isExcelMode ? (
           <>
-            <div className="border border-gray-200">
-              <table className="min-w-full divide-y divide-gray-200">
+            {/* Regular Table View */}
+            <div className="border border-gray-200 overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 text-xs">
                 <thead className="bg-gray-50">
                   <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                    <th className="px-2 py-2 text-left w-8">
+                      <input
+                        type="checkbox"
+                        checked={
+                          selectedQuestions.size === filteredQuestions.length &&
+                          filteredQuestions.length > 0
+                        }
+                        onChange={handleSelectAll}
+                        className="w-3 h-3"
+                      />
+                    </th>
+                    <th className="px-2 py-2 text-left text-xs font-medium text-gray-500 uppercase w-20">
                       S.No
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
                       Question
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                    <th className="px-2 py-2 text-left text-xs font-medium text-gray-500 uppercase w-24">
+                      Category
+                    </th>
+                    <th className="px-2 py-2 text-left text-xs font-medium text-gray-500 uppercase w-24">
                       Media
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                      Correct Answer
+                    <th className="px-2 py-2 text-left text-xs font-medium text-gray-500 uppercase w-24">
+                      Answer
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                      Created At
+                    <th className="px-2 py-2 text-left text-xs font-medium text-gray-500 uppercase w-24">
+                      Created
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                    <th className="px-2 py-2 text-left text-xs font-medium text-gray-500 uppercase w-32">
                       Actions
                     </th>
                   </tr>
@@ -455,28 +720,48 @@ export default function QuestionsPage() {
                 <tbody className="bg-white divide-y divide-gray-200">
                   {currentQuestions.map((question) => (
                     <tr key={question.id} className="hover:bg-gray-50">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-semibold text-gray-900">
+                      <td className="px-2 py-2">
+                        <input
+                          type="checkbox"
+                          checked={selectedQuestions.has(question.id)}
+                          onChange={() => toggleQuestionSelection(question.id)}
+                          className="w-3 h-3"
+                        />
+                      </td>
+
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        <div className="text-xs font-semibold text-gray-900">
                           {question.serial_number}
                         </div>
                       </td>
 
-                      <td className="px-6 py-4">
-                        <div className="text-sm font-medium text-gray-900 max-w-md truncate">
+                      <td className="px-3 py-2">
+                        <div className="text-xs text-gray-900 max-w-md truncate">
                           {question.question}
                         </div>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
+
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        {question.category_id ? (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded">
+                            {categories.find(
+                              (c) => c.id === question.category_id
+                            )?.name || "Unknown"}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-gray-400">N/A</span>
+                        )}
+                      </td>
+
+                      <td className="px-2 py-2 whitespace-nowrap">
                         {question.media_url ? (
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded">
-                              {question.media_type === "video"
-                                ? "📹 Video"
-                                : "🖼️ Image"}
+                          <div className="flex items-center gap-1">
+                            <span className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded">
+                              {question.media_type === "video" ? "📹" : "🖼️"}
                             </span>
                             <button
                               onClick={() => handleEdit(question)}
-                              className="text-xs underline text-gray-600 hover:text-gray-900"
+                              className="text-[10px] underline text-gray-600 hover:text-gray-900"
                             >
                               Change
                             </button>
@@ -487,16 +772,16 @@ export default function QuestionsPage() {
                               setMediaQuestion(question);
                               setMediaUrlInput("");
                             }}
-                            className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded hover:bg-gray-200"
+                            className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded hover:bg-gray-200"
                           >
-                            Add Media
+                            Add
                           </button>
                         )}
                       </td>
 
-                      <td className="px-6 py-4 whitespace-nowrap">
+                      <td className="px-2 py-2 whitespace-nowrap">
                         <div
-                          className={`text-sm font-semibold ${
+                          className={`text-xs font-semibold ${
                             (question.correct_answer === "A"
                               ? question.option_a
                               : question.option_b) === "CORRECT"
@@ -509,19 +794,21 @@ export default function QuestionsPage() {
                             : question.option_b}
                         </div>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+
+                      <td className="px-2 py-2 whitespace-nowrap text-xs text-gray-500">
                         {new Date(question.created_at).toLocaleDateString()}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm">
+
+                      <td className="px-2 py-2 whitespace-nowrap text-xs">
                         <button
                           onClick={() => handleView(question)}
-                          className="text-gray-700 hover:text-gray-900 mr-4 transition-colors"
+                          className="text-gray-700 hover:text-gray-900 mr-2 transition-colors"
                         >
                           View
                         </button>
                         <button
                           onClick={() => handleEdit(question)}
-                          className="text-gray-700 hover:text-gray-900 mr-4 transition-colors"
+                          className="text-gray-700 hover:text-gray-900 mr-2 transition-colors"
                         >
                           Edit
                         </button>
@@ -540,13 +827,13 @@ export default function QuestionsPage() {
 
             {/* Pagination */}
             {totalPages > 1 && (
-              <div className="flex items-center justify-center gap-2 mt-8 pt-8 border-t border-gray-200">
+              <div className="flex items-center justify-center gap-1 mt-6 pt-6 border-t border-gray-200">
                 <button
                   onClick={() =>
                     setCurrentPage((prev) => Math.max(prev - 1, 1))
                   }
                   disabled={currentPage === 1}
-                  className="px-4 py-2 border border-gray-300 text-sm disabled:opacity-30 disabled:cursor-not-allowed hover:border-gray-900 transition-colors"
+                  className="px-3 py-1.5 border border-gray-300 text-xs disabled:opacity-30 disabled:cursor-not-allowed hover:border-gray-900 transition-colors"
                 >
                   Previous
                 </button>
@@ -563,7 +850,7 @@ export default function QuestionsPage() {
                           <button
                             key={page}
                             onClick={() => setCurrentPage(page)}
-                            className={`px-3 py-2 border text-sm transition-colors ${
+                            className={`px-2.5 py-1.5 border text-xs transition-colors ${
                               currentPage === page
                                 ? "bg-black text-white border-black"
                                 : "border-gray-300 hover:border-gray-900"
@@ -577,7 +864,10 @@ export default function QuestionsPage() {
                         page === currentPage + 2
                       ) {
                         return (
-                          <span key={page} className="px-2 py-2 text-gray-400">
+                          <span
+                            key={page}
+                            className="px-1 py-1.5 text-gray-400 text-xs"
+                          >
                             ...
                           </span>
                         );
@@ -592,18 +882,98 @@ export default function QuestionsPage() {
                     setCurrentPage((prev) => Math.min(prev + 1, totalPages))
                   }
                   disabled={currentPage === totalPages}
-                  className="px-4 py-2 border border-gray-300 text-sm disabled:opacity-30 disabled:cursor-not-allowed hover:border-gray-900 transition-colors"
+                  className="px-3 py-1.5 border border-gray-300 text-xs disabled:opacity-30 disabled:cursor-not-allowed hover:border-gray-900 transition-colors"
                 >
                   Next
                 </button>
               </div>
             )}
 
+            <div className="text-center text-xs text-gray-500 mt-3">
+              Showing {startIndex + 1}-
+              {Math.min(endIndex, filteredQuestions.length)} of{" "}
+              {filteredQuestions.length}
+            </div>
+
             {/* Page Info */}
             <div className="text-center text-sm text-gray-500 mt-4">
               Showing {startIndex + 1}-
               {Math.min(endIndex, filteredQuestions.length)} of{" "}
               {filteredQuestions.length}
+            </div>
+          </>
+        ) : (
+          <>
+            {/* Excel-like Editable Table */}
+            <div className="mb-6">
+              <div style={{ width: "100%", height: "600px", overflow: "auto" }}>
+                <HotTable
+                  data={filteredQuestions.map((q) => [
+                    q.serial_number,
+                    q.question,
+                    q.option_a,
+                    q.option_b,
+                    q.correct_answer,
+                    q.explanation || "",
+                    q.media_url || "",
+                    q.id,
+                  ])}
+                  colHeaders={[
+                    "S.No",
+                    "Question",
+                    "Option A",
+                    "Option B",
+                    "Answer",
+                    "Explanation",
+                    "Media URL",
+                    "ID",
+                  ]}
+                  columns={[
+                    { data: 0, readOnly: true },
+                    { data: 1 },
+                    { data: 2 },
+                    { data: 3 },
+                    { data: 4 },
+                    { data: 5 },
+                    { data: 6 },
+                    { data: 7, readOnly: true },
+                  ]}
+                  colWidths={[80, 300, 150, 150, 100, 200, 200, 0]}
+                  hiddenColumns={{ columns: [7] }}
+                  width="100%"
+                  height={500}
+                  rowHeaders={true}
+                  contextMenu={true}
+                  manualColumnResize={true}
+                  licenseKey="non-commercial-and-evaluation"
+                  afterChange={(changes, source) => {
+                    if (source === "edit" && changes) {
+                      handleCellEdit(changes);
+                    }
+                  }}
+                />
+              </div>
+            </div>
+
+            {/* Save Button */}
+            <div className="flex justify-between items-center p-4 bg-gray-50 border border-gray-200">
+              <div className="text-sm">
+                {pendingChanges.size > 0 ? (
+                  <span className="font-medium text-orange-600">
+                    ⚠️ {pendingChanges.size} unsaved change
+                    {pendingChanges.size > 1 ? "s" : ""}
+                  </span>
+                ) : (
+                  <span className="text-gray-500">✓ No changes</span>
+                )}
+              </div>
+              <button
+                onClick={handleSaveAllChanges}
+                disabled={pendingChanges.size === 0}
+                className="px-6 py-3 bg-black text-white text-sm font-medium hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Save All Changes ({pendingChanges.size})
+              </button>
             </div>
           </>
         )}
@@ -727,8 +1097,67 @@ export default function QuestionsPage() {
           e.target.value = "";
         }}
       />
-      {/* Add Media URL Modal */}
-      {/* ✅ FIXED: Add Media Modal - Now supports BOTH file upload AND URL */}
+      {/* Bulk Category Assignment Modal */}
+      {showBulkCategoryModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white w-full max-w-md p-6">
+            <h3 className="text-lg font-medium mb-4">
+              Add Questions to Category
+            </h3>
+
+            <p className="text-sm text-gray-600 mb-4">
+              {selectedQuestions.size} question
+              {selectedQuestions.size > 1 ? "s" : ""} selected
+            </p>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Select Category
+              </label>
+              <select
+                value={bulkCategoryId}
+                onChange={(e) => setBulkCategoryId(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 text-sm focus:outline-none focus:border-gray-900"
+              >
+                <option value="">-- Choose Category --</option>
+                {categories.map((cat) => (
+                  <option key={cat.id} value={cat.id}>
+                    {cat.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  setShowBulkCategoryModal(false);
+                  setBulkCategoryId("");
+                }}
+                className="flex-1 border border-gray-300 py-2 text-sm hover:border-gray-900"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBulkAddToCategory}
+                disabled={!bulkCategoryId}
+                className="flex-1 bg-black text-white py-2 text-sm hover:bg-gray-800 disabled:opacity-50"
+              >
+                Add to Category
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Category Management Modal */}
+      {showCategoryModal && (
+        <CategoryManagementModal
+          categories={categories}
+          onClose={() => setShowCategoryModal(false)}
+          onSave={fetchCategories}
+        />
+      )}
       {mediaQuestion && (
         <div className="fixed inset-0 bg-black/30 bg-opacity-10 flex items-center justify-center z-50">
           <div className="bg-white w-full max-w-md p-6">
@@ -1371,6 +1800,231 @@ function QuestionViewModal({
             >
               Close
             </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+// Category Management Modal Component
+function CategoryManagementModal({
+  categories,
+  onClose,
+  onSave,
+}: {
+  categories: Category[];
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const [categoryName, setCategoryName] = useState("");
+  const [categoryDescription, setCategoryDescription] = useState("");
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleCreateCategory = async () => {
+    if (!categoryName.trim()) {
+      alert("Please enter a category name");
+      return;
+    }
+
+    setLoading(true);
+    const { error } = await supabase.from("categories").insert([
+      {
+        name: categoryName.trim(),
+        description: categoryDescription.trim() || null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ]);
+
+    if (error) {
+      alert("Error creating category: " + error.message);
+    } else {
+      setCategoryName("");
+      setCategoryDescription("");
+      onSave();
+    }
+    setLoading(false);
+  };
+
+  const handleUpdateCategory = async () => {
+    if (!editingCategory || !categoryName.trim()) return;
+
+    setLoading(true);
+    const { error } = await supabase
+      .from("categories")
+      .update({
+        name: categoryName.trim(),
+        description: categoryDescription.trim() || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", editingCategory.id);
+
+    if (error) {
+      alert("Error updating category: " + error.message);
+    } else {
+      setEditingCategory(null);
+      setCategoryName("");
+      setCategoryDescription("");
+      onSave();
+    }
+    setLoading(false);
+  };
+
+  const handleDeleteCategory = async (id: string) => {
+    if (!confirm("Delete this category? Questions will become uncategorized."))
+      return;
+
+    setLoading(true);
+    const { error } = await supabase.from("categories").delete().eq("id", id);
+
+    if (error) {
+      alert("Error deleting category: " + error.message);
+    } else {
+      onSave();
+    }
+    setLoading(false);
+  };
+
+  const startEdit = (category: Category) => {
+    setEditingCategory(category);
+    setCategoryName(category.name);
+    setCategoryDescription(category.description || "");
+  };
+
+  const cancelEdit = () => {
+    setEditingCategory(null);
+    setCategoryName("");
+    setCategoryDescription("");
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+      <div className="bg-white w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center p-6 border-b border-gray-200">
+          <h2 className="text-xl font-light text-gray-900">
+            Manage Categories
+          </h2>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-900"
+          >
+            <svg
+              className="w-6 h-6"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M6 18L18 6M6 6l12 12"
+              />
+            </svg>
+          </button>
+        </div>
+
+        <div className="p-6 space-y-6">
+          {/* Create/Edit Form */}
+          <div className="border border-gray-200 p-4 space-y-4">
+            <h3 className="text-sm font-medium text-gray-900">
+              {editingCategory ? "Edit Category" : "Create New Category"}
+            </h3>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Category Name *
+              </label>
+              <input
+                type="text"
+                value={categoryName}
+                onChange={(e) => setCategoryName(e.target.value)}
+                placeholder="e.g., Science, History, Math"
+                className="w-full px-3 py-2 border border-gray-300 text-sm focus:outline-none focus:border-gray-900"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Description (Optional)
+              </label>
+              <textarea
+                value={categoryDescription}
+                onChange={(e) => setCategoryDescription(e.target.value)}
+                rows={2}
+                placeholder="Brief description of this category"
+                className="w-full px-3 py-2 border border-gray-300 text-sm focus:outline-none focus:border-gray-900"
+              />
+            </div>
+
+            <div className="flex gap-2">
+              {editingCategory && (
+                <button
+                  onClick={cancelEdit}
+                  className="px-4 py-2 border border-gray-300 text-sm hover:border-gray-900"
+                >
+                  Cancel
+                </button>
+              )}
+              <button
+                onClick={
+                  editingCategory ? handleUpdateCategory : handleCreateCategory
+                }
+                disabled={loading}
+                className="px-4 py-2 bg-black text-white text-sm hover:bg-gray-800 disabled:opacity-50"
+              >
+                {loading ? "Saving..." : editingCategory ? "Update" : "Create"}
+              </button>
+            </div>
+          </div>
+
+          {/* Existing Categories */}
+          <div>
+            <h3 className="text-sm font-medium text-gray-900 mb-3">
+              Existing Categories ({categories.length})
+            </h3>
+
+            {categories.length === 0 ? (
+              <p className="text-sm text-gray-500 text-center py-4">
+                No categories yet. Create your first one above!
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {categories.map((category) => (
+                  <div
+                    key={category.id}
+                    className="flex items-center justify-between p-3 border border-gray-200 hover:bg-gray-50"
+                  >
+                    <div className="flex-1">
+                      <div className="font-medium text-sm text-gray-900">
+                        {category.name}
+                      </div>
+                      {category.description && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          {category.description}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => startEdit(category)}
+                        className="text-sm text-gray-600 hover:text-gray-900"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => handleDeleteCategory(category.id)}
+                        className="text-sm text-red-600 hover:text-red-800"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -25,6 +25,8 @@ import {
 } from "lucide-react";
 import { ClimbingBoxLoader } from "react-spinners";
 import { FastAverageColor } from "fast-average-color";
+import { HotTable } from "@handsontable/react";
+import "handsontable/dist/handsontable.full.min.css";
 const styles = `
   @keyframes slideIn {
     from {
@@ -288,6 +290,7 @@ export default function TrafficSignsPage() {
   const [showBulkImageAssign, setShowBulkImageAssign] = useState(false);
   const [deletedSigns, setDeletedSigns] = useState<TrafficSign[]>([]);
   const [showDeletedModal, setShowDeletedModal] = useState(false);
+  const [showExcelEditor, setShowExcelEditor] = useState(false);
   useEffect(() => {
     fetchSigns();
   }, []);
@@ -884,7 +887,15 @@ export default function TrafficSignsPage() {
                         className="hidden"
                       />
                     </label>
-
+                    <button
+                      onClick={() => setShowExcelEditor(true)}
+                      className="flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-300 hover:border-green-500 hover:bg-green-50 rounded-lg text-xs font-medium transition-all group"
+                    >
+                      <Edit className="w-3.5 h-3.5 text-gray-600 group-hover:text-green-600" />
+                      <span className="text-gray-700 group-hover:text-green-700">
+                        Excel Edit
+                      </span>
+                    </button>
                     <button
                       onClick={() => {
                         fetchDeletedSigns();
@@ -1173,6 +1184,15 @@ export default function TrafficSignsPage() {
             signs={deletedSigns}
             onRestore={handleRestore}
             onClose={() => setShowDeletedModal(false)}
+          />
+        )}
+        {showExcelEditor && (
+          <ExcelEditorModal
+            signs={signs}
+            onSave={() => {
+              fetchSigns();
+            }}
+            onClose={() => setShowExcelEditor(false)}
           />
         )}
       </div>
@@ -2889,6 +2909,141 @@ function DeletedSignsModal({
             className="w-full py-2.5 bg-gray-100 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-200 transition-colors"
           >
             Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+function ExcelEditorModal({
+  signs,
+  onSave,
+  onClose,
+}: {
+  signs: TrafficSign[];
+  onSave: (updatedSigns: any[]) => void;
+  onClose: () => void;
+}) {
+  const hotTableRef = useState<any>(null);
+  const [saving, setSaving] = useState(false);
+
+  const tableData = signs.map((sign) => [
+    sign.id,
+    sign.name_english,
+    sign.name_hindi,
+    sign.meaning,
+    sign.hindi_meaning,
+    sign.explanation,
+    sign.real_life_example,
+    sign.color,
+    sign.shape,
+    sign.video_url || "",
+    sign.sort_order ?? 0,
+  ]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    const hotInstance = hotTableRef[0];
+
+    if (hotInstance) {
+      const data = hotInstance.getData();
+
+      try {
+        for (let i = 0; i < data.length; i++) {
+          const row = data[i];
+          const { error } = await supabase
+            .from("traffic_signs")
+            .update({
+              name_english: row[1],
+              name_hindi: row[2],
+              meaning: row[3],
+              hindi_meaning: row[4],
+              explanation: row[5],
+              real_life_example: row[6],
+              color: row[7],
+              shape: row[8],
+              video_url: row[9] || null,
+              sort_order: row[10],
+            })
+            .eq("id", row[0]);
+
+          if (error) throw error;
+        }
+
+        showToast("All changes saved!", "success");
+        onSave([]);
+        onClose();
+      } catch (error: any) {
+        showToast("Error: " + error.message, "error");
+      }
+    }
+
+    setSaving(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div className="bg-white rounded-lg w-full max-w-[95vw] max-h-[90vh] flex flex-col">
+        <div className="p-4 border-b flex justify-between items-center">
+          <h2 className="text-xl font-semibold">📊 Excel Editor</h2>
+          <button onClick={onClose}>
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-auto p-4">
+          <HotTable
+            ref={(ref) => {
+              hotTableRef[0] = ref?.hotInstance;
+            }}
+            data={tableData}
+            colHeaders={[
+              "ID",
+              "English",
+              "Hindi",
+              "Meaning",
+              "Hindi Meaning",
+              "Explanation",
+              "Example",
+              "Color",
+              "Shape",
+              "Video URL",
+              "Sort",
+            ]}
+            columns={[
+              { readOnly: true, width: 80 },
+              { width: 120 },
+              { width: 120 },
+              { width: 150 },
+              { width: 150 },
+              { width: 200 },
+              { width: 200 },
+              { width: 100 },
+              { width: 100 },
+              { width: 150 },
+              { width: 80 },
+            ]}
+            rowHeaders={true}
+            width="100%"
+            height="500px"
+            licenseKey="non-commercial-and-evaluation"
+            contextMenu={true}
+            undo={true}
+            colWidths={[80, 120, 120, 150, 150, 200, 200, 100, 100, 150, 80]}
+            stretchH="all"
+          />
+        </div>
+
+        <div className="p-4 border-t flex gap-3">
+          <button onClick={onClose} className="flex-1 py-2 border rounded">
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="flex-1 py-2 bg-green-600 text-white rounded"
+          >
+            {saving ? "Saving..." : "Save All"}
           </button>
         </div>
       </div>
